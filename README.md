@@ -1,6 +1,6 @@
 # Yanfen-
 # Hi, I'm Yanfen
-🎓 MSc Transport & Logistics | Data & Analytics | Sustainability  
+🎓 MSc Transport & Logistics | Data & Analytics | Sustainability & Wellness  
 💻 Python • SQL • Power BI • R  
 🌍 Passionate about data for transport, logistics, and wellness  
 
