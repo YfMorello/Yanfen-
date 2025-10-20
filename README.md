@@ -10,7 +10,7 @@
 - Exploring transport and mobility datasets
 
 ### 🧠 Projects
-- [Transport Data Explorer](Urban-Transport-Optimisation) – Using operations research e.g. mixed-integer programming to optimise multimodal public transport and integrate them into a comprehensive solution for greener and more sustainable urban mobility.
+- [Transport Data Explorer in Copenhagen](Urban-Transport-Optimisation) – Using operations research e.g. mixed-integer programming to optimise multimodal public transport and integrate them into a comprehensive solution for greener and more sustainable urban mobility.
 
   
 ## 📫 Contact Me
