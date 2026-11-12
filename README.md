@@ -1,7 +1,7 @@
 # Yanfen-
 # Hi, I'm Yanfen
-🎓 MSc Transport & Logistics | Junior Data Analyst | Data & Analytics | Sustainability & Wellness  
-💻 Python • Julia • R • CPLEX • SAS • Power BI • SQL   
+🎓 MSc Transport & Logistics | Data Analyst | Data & Analytics
+💻 Python • Julia • R • CPLEX • SAS • SQL   
 🌍 Passionate about using data to improve transport, logistics, and urban mobility, with an industrial background in shipping, logistics, supply chain management, and transport planning.  
 
 
