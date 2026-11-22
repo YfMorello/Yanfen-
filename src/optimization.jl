@@ -1,530 +1,335 @@
-
-module model
 using LinearAlgebra
-using Pkg
 using CSV
 using DataFrames
 using JuMP
 using Gurobi
-using Graphs
-using GraphPlot
-#Pkg.add("Plots")
 using Plots
-stops=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/stops.csv",DataFrame)
-existinglines=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/existingLines_df.csv",DataFrame)
-stopbylines=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/stopsbyline.csv",DataFrame)
-edge=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/edge.csv",DataFrame)
-odMatrix=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/od_matrix_df_geo.csv",DataFrame)
-shortestPath=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/shortestPathwithDistance.csv",DataFrame)
 
-base400Stops=CSV.read("/Users/zoe/Desktop/DTU thesis/data/baseStops.csv",DataFrame) #change baseStops by bus stop/edge order
-baseStops=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/line_400S_stops.csv",DataFrame)
-LinesStopByEdgeOrder=CSV.read("/Users/zoe/Desktop/DTU thesis/data/CSVs/LinesStopByEdgeOrder.csv",DataFrame)
-ValidShortestPath=CSV.read("/Users/zoe/Desktop/DTU thesis/data/parsed_paths.csv",DataFrame)
-path_info=CSV.read("/Users/zoe/Desktop/DTU thesis/data/path_info.csv",DataFrame)
-ValidOD=CSV.read("/Users/zoe/Desktop/DTU thesis/data/ValidOD.csv",DataFrame)
-ValidODandPathandBusTime=CSV.read("/Users/zoe/Desktop/DTU thesis/data/ValidODandPathandBusTime.csv",DataFrame)
-journey_400SWithCoordinates=CSV.read("/Users/zoe/Desktop/DTU thesis/data/journey_400SWithCoordinates.csv",DataFrame)
+# Configuration & constants (override DATA_DIR via ENV["DATA_DIR"] if needed)
+const DATA_DIR = get(ENV, "DATA_DIR", joinpath(@__DIR__, "..", "data"))
+const TAVG_WALKING_SPEED = 5.0   # km/h
+const TAVG_BIKE_SPEED = 15.0      # km/h
 
-Tavg_walking_speed=5 #5km/h
-Tavg_bike_speed=15 #12km/h
+# 1. Load datasets
+stops = CSV.read(joinpath(DATA_DIR, "CSVs", "stops.csv"), DataFrame)
+existinglines = CSV.read(joinpath(DATA_DIR, "CSVs", "existingLines_df.csv"), DataFrame)
+stopbylines = CSV.read(joinpath(DATA_DIR, "CSVs", "stopsbyline.csv"), DataFrame)
+edge = CSV.read(joinpath(DATA_DIR, "CSVs", "edge.csv"), DataFrame)
+odMatrix = CSV.read(joinpath(DATA_DIR, "CSVs", "od_matrix_df_geo.csv"), DataFrame)
+shortestPath = CSV.read(joinpath(DATA_DIR, "CSVs", "shortestPathwithDistance.csv"), DataFrame)
 
-function haversine_distance(lat1,lon1, lat2,lon2)
-    lat1=deg2rad(lat1)
-    lon1=deg2rad(lon1)
-    lat2=deg2rad(lat2)
-    lon2=deg2rad(lon2)
-    r=6371.0
-    delta_lat = lat2 - lat1
-    delta_lon = lon2 - lon1
+base400Stops = CSV.read(joinpath(DATA_DIR, "baseStops.csv"), DataFrame)
+baseStops = CSV.read(joinpath(DATA_DIR, "CSVs", "line_400S_stops.csv"), DataFrame)
+LinesStopByEdgeOrder = CSV.read(joinpath(DATA_DIR, "CSVs", "LinesStopByEdgeOrder.csv"), DataFrame)
+ValidODandPathandBusTime = CSV.read(joinpath(DATA_DIR, "ValidODandPathandBusTime.csv"), DataFrame)
+journey_400SWithCoordinates = CSV.read(joinpath(DATA_DIR, "journey_400SWithCoordinates.csv"), DataFrame)
 
-    a=sin(delta_lat/2)^2 +cos(lat1)*cos(lat2) *sin(delta_lon/2)^2
-    c= 2*atan(sqrt(a), sqrt(1-a))
-
-    return r*c
+# Rename columns with spaces/hyphens cleanly if present
+for (old_col, new_col) in [
+    ("left-stop", :left_stop),
+    ("right-stop", :right_stop),
+    ("min  travel  time", :MinTravelTime),
+]
+    if String(new_col) ∉ names(LinesStopByEdgeOrder) && old_col ∈ names(LinesStopByEdgeOrder)
+        rename!(LinesStopByEdgeOrder, old_col => new_col)
+    end
 end
 
+# Lookup dictionaries for O(1) access
+stop_coords = Dict{Int, Tuple{Float64, Float64}}(
+    Int(row.stop_id) => (Float64(row.latitude), Float64(row.longitude))
+    for row in eachrow(stops)
+)
+stop_names = Dict{Int, String}(
+    Int(row.stop_id) => string(row.long_name)
+    for row in eachrow(stops) if :long_name ∈ propertynames(row)
+)
 
-
-function haversine_distanceStopset(baseStops::DataFrame, lat, lon, maxDistance, origin, destination )
-    distanceToStopTable = Array{Float64,2}(undef, 0, 4)
-    foundCloseStop = false
-    for stop in 1:size(baseStops,1)
-        distanceToStop = haversine_distance(baseStops[stop,5],baseStops[stop,4], lat, lon)
-    
-        if distanceToStop < maxDistance
-            foundCloseStop=true
-            distanceToStopTable = [distanceToStopTable; origin destination baseStops[stop,2] distanceToStop]
-        end
-    end
-        if foundCloseStop
-            return distanceToStopTable
-        end
-
-    
+# 2. Spatial distance helpers
+function haversine_distance(lat1::Real, lon1::Real, lat2::Real, lon2::Real)::Float64
+    lat1_r = deg2rad(Float64(lat1))
+    lon1_r = deg2rad(Float64(lon1))
+    lat2_r = deg2rad(Float64(lat2))
+    lon2_r = deg2rad(Float64(lon2))
+    r = 6371.0
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = sin(dlat / 2)^2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2)^2
+    c = 2 * atan(sqrt(a), sqrt(max(0.0, 1.0 - a)))
+    return r * c
 end
-#radius equal to 3
-function calculateDistanceTo400SStopsWithinRadius(odMatrix, baseStops,stops;radius)
-    validOdsDistanceOriginToClosest400SStops=[]
-    validOdsDistanceDestinationToClosest400SStops=[]
 
-    baseStops_400S=Set(baseStops[:,"stop_id"])
-
-    for od_row in eachrow(odMatrix)
-        origin=od_row["origin_id"]
-        destination=od_row["destination_id"]
-                
-        #The origin is on the 400S, and destination is not
-        if (!(origin in baseStops_400S) && destination in baseStops_400S)
-            #find the closest 400s stop to the destination
-            #check if the distance is small enough to bike&walk
-            #if so, store in validODs and include distance for walking and biking from closest stop, including closest 400S ID
-            odsClosest400SStops = haversine_distanceStopset(baseStops,od_row["origin_latitude"], od_row["origin_longitude"], radius, origin, destination)
-            push!(validOdsDistanceOriginToClosest400SStops, odsClosest400SStops)
-        end
-        if (!(destination in baseStops_400S) && origin in baseStops_400S)
-            #find the closest 400s stop to the destination
-            #check if the distance is small enough to bike&walk
-            #if so, store in validODs and include distance for walking and biking from closest stop, including closest 400S ID
-            odsClosest400SStops = haversine_distanceStopset(baseStops_400S,od_row["Destination Latitude"], od_row["Destination Longitude"], radius, origin, destination)
-            push!(validOdsDistanceDestinationToClosest400SStops, odsClosest400SStops)
+function haversine_distance_stopset(
+    base_stops::DataFrame,
+    lat::Real,
+    lon::Real,
+    max_distance::Float64,
+    origin::Int,
+    destination::Int,
+)::Matrix{Float64}
+    rows = Vector{Vector{Float64}}()
+    for stop_row in eachrow(base_stops)
+        dist = haversine_distance(stop_row.latitude, stop_row.longitude, lat, lon)
+        if dist < max_distance
+            push!(rows, [Float64(origin), Float64(destination), Float64(stop_row.stop_id), dist])
         end
     end
-    return validOdsDistanceOriginToClosest400SStops, validOdsDistanceDestinationToClosest400SStops
+    isempty(rows) && return Matrix{Float64}(undef, 0, 4)
+    return permutedims(hcat(rows...))
 end
-#Valid OD and shortestpath
 
-stop_coords=Dict(row.stop_id => (row.latitude, row.longitude) for row in eachrow(stops))
-function StopsWithin3km(stop_id::Int, ordered_baseStops::DataFrame)
-    if !haskey(stop_coords, stop_id)
-        return false
-    end
-    lat1, lon1=stop_coords[stop_id]
-    for row in eachrow(ordered_baseStops)
-        dist=haversine_distance((lat1,lon1),(lat2,lon2))
-        if dist <= 3.0
-            return true
+# 3. Filter OD pairs and build feeder journey table
+function filter_od_pairs_400s(shortest_path::DataFrame, base_stops::DataFrame)
+    filtered_od = DataFrame(origin = Int[], destination = Int[])
+    path_info = DataFrame(shortest_path = String[], min_calculated_time = Float64[])
+    stops_400s = Set{Int}(Int.(base_stops[!, :stop_id]))
+
+    for row in eachrow(shortest_path)
+        o = Int(row.origin)
+        d = Int(row.destination)
+        if (o ∈ stops_400s) || (d ∈ stops_400s)
+            push!(filtered_od, (origin = o, destination = d))
+            push!(path_info, (
+                shortest_path = string(row.shortest_path),
+                min_calculated_time = Float64(row.calculated_min_time) / 60.0,
+            ))
         end
     end
-    return false
+    return filtered_od, path_info
 end
-filteredODTrips=filter(row -> 
-    StopsWithin3km(row.origin_id,ordered_baseStops) || StopsWithin3km(row.destination_id, ordered_baseStops),
-    odMatrix)
 
+function build_journey_400s(
+    od_matrix::DataFrame,
+    base_stops::DataFrame,
+    coords_lookup::Dict{Int, Tuple{Float64, Float64}},
+    radius_km::Float64,
+)::DataFrame
+    stops_400s = Set{Int}(Int.(base_stops[!, :stop_id]))
+    base_coords = [
+        (Int(r.stop_id), Float64(r.latitude), Float64(r.longitude))
+        for r in eachrow(base_stops)
+    ]
 
-function filter_OD_pairs_StartOrEndon400S(shortestPath::DataFrame,baseStops::DataFrame)
-    filtered_OD_pairs=DataFrame(origin=Int[],destination=Int[])
-    path_info = DataFrame(shortest_path=String[], min_calculated_time=Float64[])
+    out = DataFrame(
+        origin_id = Int[],
+        destination_id = Int[],
+        Not_400S_stop_id = Int[],
+        nearest_400S_stop = Int[],
+        Not400SstopDistanceTo400SStop = Float64[],
+        Not_400S_stop_latitude = Float64[],
+        Not_400S_stop_longitude = Float64[],
+        nearest_400S_stop_latitude = Float64[],
+        nearest_400S_stop_longitude = Float64[],
+    )
 
-    baseStops_400S = Set(baseStops[:,"stop_id"])
+    for row in eachrow(od_matrix)
+        o = Int(row.origin_id)
+        d = Int(row.destination_id)
+        if (o ∈ stops_400s) || (d ∈ stops_400s)
+            target_stop = (o ∈ stops_400s) ? d : o
+            haskey(coords_lookup, target_stop) || continue
+            t_lat, t_lon = coords_lookup[target_stop]
 
-    for path_row in eachrow(shortestPath)
-        origin=path_row[:origin]
-        destination=path_row[:destination]
-        if origin in baseStops_400S || destination in baseStops_400S
-            push!(filtered_OD_pairs,(origin=origin,destination=destination))
-            push!(path_info,(shortest_path=path_row[:shortest_path],min_calculated_time=path_row[:calculated_min_time]/60))
-        end
-    end
-    #unique_OD_pairs=unique(filtered_OD_pairs)
-    return filtered_OD_pairs, path_info
-end
-#P=filter_OD_pairs_using_400S(shortestPath,baseStops)
-P,path_info=filter_OD_pairs_StartOrEndon400S(shortestPath,baseStops)
-ValidODandPathandBusTime=hcat(P,path_info) #make P and path_info together
-#find nearest400Stop make DataFrame
-function filter_400S(odMatrix::DataFrame,shortestPath::DataFrame, baseStops::DataFrame,stops::DataFrame,Radius::Float64)
-    filter_400S_df=DataFrame(origin_id= Int[], destination_id=Int[],Not_400S_stop_id=Int[],nearest_400S_stop=Int[],Not400SstopDistanceTo400SStop=Float64[]) #union allow nothing in nearest_400S_stop
-    
-    baseStops_400S=Set(baseStops[:,"stop_id"]) #a set of 400S stops cuz baseStops is DF
-    for od_row in eachrow(odMatrix)
-        origin=od_row["origin_id"]
-        destination=od_row["destination_id"]
-        if (origin in baseStops_400S) || (destination in baseStops_400S)
-            path_row=shortestPath[(shortestPath.origin .==origin) .& (shortestPath.destination .==destination), :]
+            nearest_id = nothing
+            nearest_lat = NaN
+            nearest_lon = NaN
+            min_dist = Inf
 
-            if nrow(path_row)>0
-                path_string =path_row[1,:shortest_path]
-                cleaned_string = replace(path_string, "[" => "")
-                cleaned_string = replace(cleaned_string, "]" => "")
-                path_stops = Int.(parse.(Float64, split(cleaned_string, ","))) #split strings of shortest_path
-                nearest_400S_stop=nothing
-                min_distance=Inf
-
-
-                #if starting at 400S, lookup D, same to D, check o
-                if origin in baseStops_400S
-                    target_stop=destination
-                elseif destination in baseStops_400S
-                    target_stop = origin
-            
-                else
-                    continue
+            for (b_id, b_lat, b_lon) in base_coords
+                dist = haversine_distance(t_lat, t_lon, b_lat, b_lon)
+                if dist < min_dist
+                    min_dist = dist
+                    nearest_id = b_id
+                    nearest_lat = b_lat
+                    nearest_lon = b_lon
                 end
-                target_row = stops[stops[!,:stop_id] .==target_stop,:]
-                if nrow(target_row) >0
-                    target_lat=target_row[1,:latitude]
-                    target_lon=target_row[1,:longitude]
+            end
 
-                    for base_stop_row in eachrow(baseStops)
-                        base_lat=base_stop_row[:latitude]
-                        base_lon=base_stop_row[:longitude]
-                        distance=haversine_distance(target_lat,target_lon,base_lat,base_lon)
-                        if distance <min_distance
-                            min_distance =distance
-                            nearest_400S_stop =base_stop_row[:stop_id]
-                        end
-                    end
-                    if min_distance <= Radius && nearest_400S_stop !=nothing
-                        push!(filter_400S_df,(origin, destination, target_stop, nearest_400S_stop, min_distance))
-                    end
-                
-
-            
-                end
-            
-                
+            if min_dist <= radius_km && nearest_id !== nothing
+                push!(out, (
+                    o, d, target_stop, nearest_id, min_dist,
+                    t_lat, t_lon, nearest_lat, nearest_lon
+                ))
             end
         end
     end
-
-    return filter_400S_df
+    return out
 end
-Radius=5.0
-insertcols!(journey_400S, ncol(journey_400S) + 1, :Not_400S_stop_latitude => fill(NaN, nrow(journey_400S)))
-insertcols!(journey_400S, ncol(journey_400S) + 1, :Not_400S_stop_longitude => fill(NaN, nrow(journey_400S)))
-insertcols!(journey_400S, ncol(journey_400S) + 1, :nearest_400S_stop_latitude => fill(NaN, nrow(journey_400S)))
-insertcols!(journey_400S, ncol(journey_400S) + 1, :nearest_400S_stop_longitude => fill(NaN, nrow(journey_400S)))
-for i in 1:nrow(journey_400S)
-    not_400S_stop_id = journey_400S[i, :Not_400S_stop_id]
-    nearest_400S_stop = journey_400S[i, :nearest_400S_stop]
-    not_400S_row = stops[stops[!, :stop_id] .== not_400S_stop_id, :]
-    if nrow(not_400S_row) > 0
-        journey_400S[i, :Not_400S_stop_latitude] = not_400S_row[1, :latitude]
-        journey_400S[i, :Not_400S_stop_longitude] = not_400S_row[1, :longitude]
+
+# 4. Non-bus access/egress time calculation (supports single dock Int or iterable of dock IDs)
+function calculate_dpl(
+    origin::Int,
+    destination::Int,
+    journey_lookup::Dict{Tuple{Int, Int}, NamedTuple},
+    coords_lookup::Dict{Int, Tuple{Float64, Float64}},
+    dock_locations,
+)
+    key = (origin, destination)
+    if !haskey(journey_lookup, key)
+        return 0.0, 0.0, 0.0, 0.0, 0.0
     end
-    nearest_400S_row = stops[stops[!, :stop_id] .== nearest_400S_stop, :]
-    if nrow(nearest_400S_row) > 0
-        journey_400S[i, :nearest_400S_stop_latitude] = nearest_400S_row[1, :latitude]
-        journey_400S[i, :nearest_400S_stop_longitude] = nearest_400S_row[1, :longitude]
+
+    j = journey_lookup[key]
+    dist_to_400s = j.dist_to_400s
+    t_lat, t_lon = j.t_lat, j.t_lon
+    n_lat, n_lon = j.n_lat, j.n_lon
+
+    if dist_to_400s < 1.0
+        walk_min = (dist_to_400s / TAVG_WALKING_SPEED) * 60.0
+        return j.nearest_stop, dist_to_400s, 0.0, dist_to_400s, walk_min
     end
-end
-journey_400S
-CSV.write("journey_400SWithCoordinates.csv",journey_400S)
-#journey_400S
-#for id in journey_400S.Not_400S_stop_id
-#    if id in stops[!, :stop_id]
-#        println("ID $id exists in stops.")
-#    else
-#        println("ID $id does NOT exist in stops.")
-#    end
-#end
 
-#dpl
-function dpl(origin,destination,journey_400SWithCoordinates,dock_locations)
-    NonBusTime = 0.0
-    filtered_journey=journey_400SWithCoordinates[(journey_400SWithCoordinates[!,:origin_id] .==origin) .& (journey_400SWithCoordinates[!,:destination_id] .==destination), :]
+    docks = dock_locations isa Integer ? [Int(dock_locations)] : collect(dock_locations)
+    best_bike_km = 0.0
+    best_walk_km = dist_to_400s
+    best_non_bus_min = (dist_to_400s / TAVG_WALKING_SPEED) * 60.0
 
-    if nrow(filtered_journey) ==0
-        return 0.0, 0.0, 0.0,0.0,0.0 #return to 0.0 if no valid journey
-    end
-    nearest_400S_stop = filtered_journey[1,:nearest_400S_stop]
-    distanceTo400s=filtered_journey[1,:Not400SstopDistanceTo400SStop]
-    not_400S_id = filtered_journey[1, :Not_400S_stop_id]
-    target_lat = filtered_journey[1, :Not_400S_stop_latitude]
-    target_lon = filtered_journey[1, :Not_400S_stop_longitude]
-    nearest_400S_stop_lat=filtered_journey[1,:nearest_400S_stop_latitude]
-    nearest_400S_stop_lon=filtered_journey[1,:nearest_400S_stop_longitude]
-    distanceFrom_l_to_target_stop = 0.0
-    distanceFrom_l_to_nearest_400S_stop = 0.0
+    for dock in docks
+        dock_id = dock isa Integer ? Int(dock) : continue
+        haskey(coords_lookup, dock_id) || continue
+        d_lat, d_lon = coords_lookup[dock_id]
 
-    if distanceTo400s < 1.0
-        NonBusTime += (distanceTo400s / Tavg_walking_speed) * 60  
-    else
-        # Iterate over each dock location
-        for dock in dock_locations
-            dock_row = stops[stops[!, :stop_id] .== dock, :]
-            dock_lat = dock_row[1, :latitude]
-            dock_lon = dock_row[1, :longitude]
+        walk_km = haversine_distance(t_lat, t_lon, d_lat, d_lon)
+        bike_km = haversine_distance(d_lat, d_lon, n_lat, n_lon)
+        cand_min = (bike_km / TAVG_BIKE_SPEED + walk_km / TAVG_WALKING_SPEED) * 60.0
 
-            # Calculate distances
-            distanceFrom_l_to_target_stop = haversine_distance(target_lat, target_lon, dock_lat, dock_lon)
-            distanceFrom_l_to_nearest_400S_stop = haversine_distance(dock_lat, dock_lon, nearest_400S_stop_lat, nearest_400S_stop_lon)
-
-            # Update NonBusTime
-            NonBusTime += min(distanceTo400s / Tavg_walking_speed,
-                (distanceFrom_l_to_nearest_400S_stop / Tavg_bike_speed + distanceFrom_l_to_target_stop / Tavg_walking_speed))
+        if cand_min < best_non_bus_min
+            best_non_bus_min = cand_min
+            best_bike_km = bike_km
+            best_walk_km = walk_km
         end
     end
-    return nearest_400S_stop,distanceTo400s, distanceFrom_l_to_nearest_400S_stop,distanceFrom_l_to_target_stop,NonBusTime
-    
+
+    return j.nearest_stop, dist_to_400s, best_bike_km, best_walk_km, best_non_bus_min
 end
 
+# 5. Prepare model inputs with precomputed lookups
+od_filtered, path_info = filter_od_pairs_400s(shortestPath, baseStops)
+od_pairs = [(Int(r.origin), Int(r.destination)) for r in eachrow(od_filtered)]
 
-#test
-origin_id=206
-destination_id=3786
-nearest_400S_stop,distanceTo400s, distanceFrom_l_to_nearest_400S_stop,distanceFrom_l_to_target_stop=dpl(origin_id,destination_id,journey_400SWithCoordinates,stopbylines)
-#make min() time into dpl, take dpl[5] into objective function
-#NonBusTime=min(distance_to_target_stop/Tavg_walking_speed,(distanceFrom_l_to_nearest_400S_stop/Tavg_bike_speed+distanceFrom_l_to_target_stop/Tavg_walking_speed))
-#need update dpl, if set threshold for walking distance, to get walking time
+bus_time_lookup = Dict{Tuple{Int, Int}, Float64}()
+for row in eachrow(ValidODandPathandBusTime)
+    bus_time_lookup[(Int(row.origin), Int(row.destination))] = Float64(row.min_calculated_time)
+end
 
-#call function
-origin_id=52623
-destination_id=4525
+trips_by_od = Dict{Tuple{Int, Int}, Float64}()
+for row in eachrow(odMatrix)
+    k = (Int(row.origin_id), Int(row.destination_id))
+    trips_by_od[k] = get(trips_by_od, k, 0.0) + Float64(row.trips)
+end
 
-nearest_400S_stop,distance,biking_time,walking_time=dpl(origin_id,destination_id,journey_400S,stops)
-#Tbus
-function TbusFiliteredOD(P::DataFrame,path_info::DataFrame,shortestPath::DataFrame)
-    Tbus_df=DataFrame(origin=Int[], destination=Int[],bus_time=Float64[])
-    
-    for (i, od_pair) in enumerate(eachrow(P))
-        origin, destination=od_pair
+journey_lookup = Dict{Tuple{Int, Int}, NamedTuple}()
+for row in eachrow(journey_400SWithCoordinates)
+    k = (Int(row.origin_id), Int(row.destination_id))
+    journey_lookup[k] = (
+        nearest_stop = Int(row.nearest_400S_stop),
+        dist_to_400s = Float64(row.Not400SstopDistanceTo400SStop),
+        t_lat = Float64(row.Not_400S_stop_latitude),
+        t_lon = Float64(row.Not_400S_stop_longitude),
+        n_lat = Float64(row.nearest_400S_stop_latitude),
+        n_lon = Float64(row.nearest_400S_stop_longitude),
+    )
+end
 
-        path_row=path_info[i,:]
-        matching_path_row=shortestPath[(shortestPath.origin .==origin) .& (shortestPath.destination .==destination),:]
+candidate_docks = unique(Int.(stopbylines[!, :stop_id]))
+P_test = od_pairs[1:min(end, 385)]
+L_test = candidate_docks[1:min(end, 1293)]
 
-        if nrow(matching_path_row)>0
-            min_calculated_time=matching_path_row[1,:calculated_min_time]
-            push!(Tbus_df,(origin,destination,(min_calculated_time)/60))#minuutes
-        else
-            println("No shortet path found for OD pair ($origin -> $destination)")
-            push!(Tbus_df, (origin,destination,NaN))
-        end
+# Precompute time savings (minutes per rider) for each (p, l)
+time_saved = Dict{Tuple{Tuple{Int, Int}, Int}, Float64}()
+for p in P_test
+    t_bus = get(bus_time_lookup, p, 0.0)
+    for l in L_test
+        _, _, bike_km, walk_km, _ = calculate_dpl(p[1], p[2], journey_lookup, stop_coords, l)
+        bike_min = (bike_km / TAVG_BIKE_SPEED) * 60.0
+        walk_min = (walk_km / TAVG_WALKING_SPEED) * 60.0
+        time_saved[(p, l)] = t_bus - bike_min - walk_min
     end
-    return Tbus_df
 end
 
-Tbus_df = TbusFiliteredOD(P, path_info, shortestPath)
-function  get_Tbus(p::Tuple{Int64,Int64},Tbus_df::DataFrame)#can only get bus time for od pair from o to d
-
-    row=Tbus_df[(Tbus_df.origin .==p[1]) .&(Tbus_df.destination .==p[2]),:]
-    if nrow(row)==0
-        error("OD pair $(p) not found in TbusFiliteredOD")
-    end
-    return row.bus_time[1]
-end
-#create a function to calculate any bus stops bus time.
-rename!(LinesStopByEdgeOrder,"left-stop" => :left_stop)
-rename!(LinesStopByEdgeOrder,"right-stop" => :right_stop)
-
-rename!(LinesStopByEdgeOrder,"min  travel  time" => :MinTravelTime)
-#check if previous stop and next stop in either left_stop or right_stop. 
-#left_stop and right_stop do not necessarily connect to each other,
-# check whether stops connect by one side, either all left_stop or right_stop. 
-#if a trip changes line in between, do the same, to see which direction it takes, after they transfer. but only on side every time
-#function calculateLastStopson400Sbustime(last_400S_stop::Int, target_stop::Int,lines_df::DataFrame)#计算起点或者终点到最近400S站点的公交时间
- #   total_time= 0.0
- ##   found_route=false
-  #  for row in eachrow(lines_df)
-  #      if (row[:left_stop] ==last_400S_stop && row[:right_stop] ==target_stop) ||
-  #          (row[:left_stop] == target_stop && row[:right_stop] ==last_400S_stop)
-  #          total_time +=row[:MinTravelTime] /60 #minutes
-  #          found_route=true
-
-  #      end
- #   end
- #   return found_route ? total_time  : -1.0
-
-#end
-
-#更新dpl
-#function dpl(origin::Int, destination::Int, journey_400S::DataFrame, lines_df::DataFrame, path_info::DataFrame)
-#    filtered_journey=journey_400S[(journey_400S[!,:origin_id] .==origin_id) .& (journey_400S[!,:destination_id] .==destination_id), :]
-#    nearest_400S_stop = nothing
-#    distanceTo400s = 0.0
-#    biking_time = 0.0
-#    for row in eachrow(journey_400S)
-#        if row.origin_id == origin && row.destination_id == destination
-#            nearest_400S_stop = row.nearest_400S_stop
-#            distanceTo400s = row.distanceTo400s
-#            biking_time = row.biking_time
-#            break  # 找到匹配的行后退出循环
-#        end
-#    end
-       #计算起点或者终点到最近400S站点的公交时间
-#    bus_time = calculateLastStopson400Sbustime(nearest_400S_stop, destination, LinesStopByEdgeOrder)
-    #在有效od找到最短路径时间
-#    min_calculated_time_row=ValidODandPathandBusTime[(ValidODandPathandBusTime[:,:origin] .==origin) .&
-                                            #(ValidODandPathandBusTime[:,:destination] .==destination),:]
-    
-    #如果有数据                                                
-#    if nrow(min_calculated_time_row) >0
-#        min_calculated_time=min_calculated_time_row[1,:min_calculated_time]
-        #最短路径bustime减去起点或者终点到最近400S站点的公交时间，纯400S乘坐时间，check在400S站点的各个时间
-#        adjusted_using400s_time = min_calculated_time_row[1, :min_calculated_time] - bus_time #this is time on 400S,check from linesStopByEdgeOrder df
-        #else
-        #adjusted_time=0.0
-#    end
-
-#    return DataFrame(nearest_400S_stop=nearest_400S_stop, distanceTo400s=distanceTo400s, biking_time=biking_time, adjusted_time=adjusted_using400s_time)
-
-
-
-#end
-
-#nearest_400S_stop, distance, biking_time, adjusted_using400s_time = dpl(origin_id, destination_id, journey_400S, LinesStopByEdgeOrder, ValidODandPathandBusTime)
-
-#a_p
-function aggregateTrips(P::Vector{Tuple{Int64, Int64}},odMatrix::DataFrame)
-    aggregateTrips=DataFrame(origin=Int[],destination=Int[],trips=Float64[])
-    for (origin,destination) in P
-        matching_rows=odMatrix[(odMatrix.origin_id .==origin) .&(odMatrix.destination_id .==destination), :]
-        if nrow(matching_rows)>0
-            total_trips=sum(matching_rows[!,:trips])
-            push!(aggregateTrips,(origin=origin,destination=destination,trips=total_trips))
-        end
-    end
-    return aggregateTrips
-end
-function OtherBusTime(origin::Int64, destination::Int64, ValidODandPathandBusTime::DataFrame)
-    for row in eachrow(ValidODandPathandBusTime) 
-        if row.origin == origin && row.destination ==destination
-            busTime=row.min_calculated_time
-            return busTime
-        end
-    end
-    return nothing
-end
-origin_id=52623
-destination_id=4525
-OtherBusTakenTime=OtherBusTime(origin_id,destination_id,ValidODandPathandBusTime)
-P=[(row.origin, row.destination) for row in eachrow(P)]
-a_p=aggregateTrips(P,odMatrix)
-L=collect(unique(stopbylines[!, :stop_id]))
-
-
-P_test=P[1:min(end,385),:]
-L_test=L[1:min(end,1293)]
-
+# 6. Build and solve MILP model
 m = Model(Gurobi.Optimizer)
-#set_optimizer_attribute(m, "TimeLimit", 600)
+set_optimizer_attribute(m, "TimeLimit", 600)
 
+C_d = 500.0        # USD per dock
+C_b = 300.0        # USD per bike
+B = 100_000.0      # Total budget (USD)
+M_l = Dict(l => 50 for l in L_test)
 
-C_d=500 #  USD/dock
-C_b=300  # USD/bike
-B=100000 #budget 
+@variable(m, x[l in L_test], Bin)
+@variable(m, y[l in L_test] >= 0, Int)
+@variable(m, Wpl[p in P_test, l in L_test] >= 0, Int)
 
+@objective(m, Max, sum(time_saved[(p, l)] * Wpl[p, l] for p in P_test, l in L_test))
 
-
-M_l = Dict(l => 50 for l in L_test) #key-value pair 键对值，返回
-#capacity_factor=0.4
-#M_l=a_p.trips .*capacity_factor
-
-
-@variable(m,x[l in L_test],Bin) #x_l is binary, 1 if dock is placed at location L
-@variable(m,y[l in L_test]>=0,Int) #y_l is the number of bikes at dock l, integer
-
-@variable(m,Wpl[p in P_test, l in L_test]>=0, Int)
-
-@objective(m, Max, sum( Wpl[p, l] * (
-    OtherBusTime(p[1],p[2],ValidODandPathandBusTime)  -  
-    (dpl(p[1], p[2], journey_400SWithCoordinates,l)[3]/Tavg_bike_speed*60)- (dpl(p[1],p[2],journey_400SWithCoordinates,l)[4]/Tavg_walking_speed*60)
-) for p in P_test, l in L_test
-#km/(km/h)*60=minutes
- #   Wpl[p, l] * (
- #       get_Tbus(p, Tbus_df)  -  
- #       (dpl(p[1], p[2], journey_400SWithCoordinates,l)[3]/Tavg_bike_speed)- (dpl(p[1],p[2],journey_400SWithCoordinates,l)[4]/Tavg_walking_speed)
- #   ) for p in P_test, l in L_test #dpl(p[1], p[2], journey_400S,l)[5] replace 
-))#convert Tbus to minutes, it is seconds,Tbus/60 and max 
-#1.Location and Capacity Constraints
 @constraint(m, [l in L_test], y[l] <= M_l[l] * x[l])
+@constraint(m, [l in L_test], sum(Wpl[p, l] for p in P_test) <= y[l])
+@constraint(m, [p in P_test], sum(Wpl[p, l] for l in L_test) <= get(trips_by_od, p, 0.0))
+@constraint(m, C_d * sum(x[l] for l in L_test) + C_b * sum(y[l] for l in L_test) <= B)
 
-#2.bike usage constraints
-@constraint(m, [l in L_test], sum(Wpl[p,l] for p in P_test) <= y[l])
-
-
-@constraint(m, [p in P_test], sum(Wpl[p,l] for l in L_test) <= coalesce(a_p[(a_p.origin .==p[1]) .&(a_p.destination .==p[2]),:trips][1],0.0))#if a_p is missing
-#3.budget constraint
-@constraint(m, C_d*sum(x[l] for l in L_test) + C_b * sum(y[l] for l in L_test) <= B)
-#4. dock placement constraint: xl=1 for all l in S_BRT
-#@constraint(model, [l in S_BRT], x[l] ==1)
-
-#non-negative integer constraint for the number of bikes: yl>=0
-@constraint(m, [l in L_test], y[l] >=0)
-
-#Optimize
 optimize!(m)
 
-if termination_status(m) == MOI.OPTIMAL
+status = termination_status(m)
+if status == MOI.OPTIMAL || status == MOI.TIME_LIMIT
     println("Objective value: ", objective_value(m))
-    println("Binary Variables (x):")
     for l in L_test
-        println("x[$l]: ", value(x[l]))
+        if value(x[l]) > 0.5
+            println("Dock l=$l: x=", round(value(x[l]); digits=2), ", y=", Int(round(value(y[l]))))
+        end
     end
-    println("\nInteger Variables (y):")
-    for l in L_test
-        println("y[$l]: ", value(y[l]))
-    end
-    #println("\nUsage Variables (Wpl):")
-    #for p in P_test
-    #    for l in L_test
-    #        println("Wpl[$p, $l]: ", value(Wpl[p, l]))  # 打印每个 OD 对和停靠点的使用量
-    #    end
-    #end
 else
-    println("Model did not solve optimally. Termination status: ", termination_status(m))
+    println("Solver finished with status: ", status)
 end
 
-println("Objective Values: ", objective_value(m))
-println("Binary Variables (x):")
-for l in L_test
-    if value(x[l]) ==1.0
-        println("x[$l]: ", value(x[l]))
-        println("y[$l]: ", value(y[l]))
-    end
-end
-
-#try to plot x_l
-selected_docks = []
+# 7. Plot selected docks along ordered 400S route
+selected_docks = Int[]
 bike_counts = Int[]
-dock_latitudes=Float64[]
-dock_longitudes=Float64[]
-long_names=String[]
-for l in L_test
-    if value(x[l]) == 1.0  # dock opens
-        stop_row = stops[stops.stop_id .== l, :]  
-        
-        if nrow(stop_row) > 0  
+dock_lats = Float64[]
+dock_lons = Float64[]
+
+if has_values(m)
+    for l in L_test
+        if value(x[l]) > 0.5 && haskey(stop_coords, l)
+            lat, lon = stop_coords[l]
             push!(selected_docks, l)
-            push!(dock_latitudes, stop_row[1, :latitude])    
-            push!(dock_longitudes, stop_row[1, :longitude])  
-            push!(long_names, stop_row[1, :long_name])      
-            push!(bike_counts, value(y[l]))               
+            push!(bike_counts, Int(round(value(y[l]))))
+            push!(dock_lats, lat)
+            push!(dock_lons, lon)
         end
     end
 end
 
+sorted_400s = sort(base400Stops, :edge_order)
+ordered_ids = Int.(sorted_400s[!, :left_stop])
+id_rank = Dict(id => idx for (idx, id) in enumerate(ordered_ids))
 
-sorted_base400Stops = sort(base400Stops, :edge_order)
+filtered_base = filter(row -> haskey(id_rank, Int(row.stop_id)), baseStops)
+sort!(filtered_base, by = row -> id_rank[Int(row.stop_id)])
 
-ordered_stop_ids = sorted_base400Stops[!, :left_stop]  
-
-ordered_baseStops = filter(row -> row[:stop_id] in ordered_stop_ids, baseStops)
-filtered_baseStops = filter(row -> row[:stop_id] in ordered_stop_ids, baseStops)
-permutation = [findfirst(id -> id == row[:stop_id], ordered_stop_ids) for row in eachrow(filtered_baseStops)]
-ordered_baseStops = filtered_baseStops[sortperm(permutation), :]
-
-ordered_baseStops
-route_latitudes = ordered_baseStops[!, :latitude]
-route_longitudes = ordered_baseStops[!, :longitude]
-
-plot(route_longitudes, route_latitudes,
+plt = plot(
+    filtered_base[!, :longitude],
+    filtered_base[!, :latitude],
     seriestype = :line,
     marker = :circle,
     label = "400S Route",
     title = "Selected Docks and 400S Route",
     xlabel = "Longitude",
     ylabel = "Latitude",
-    legend = :bottomright
-)
-scatter!(dock_longitudes, dock_latitudes,
-    marker = :star5,
-    markersize = 8,
-    color = :red,
-    label = "Selected Docks"
+    legend = :bottomright,
 )
 
+if !isempty(dock_lons)
+    scatter!(
+        plt,
+        dock_lons,
+        dock_lats,
+        marker = :star5,
+        markersize = 8,
+        color = :red,
+        label = "Selected Docks",
+    )
+end
+
+display(plt)
 
 end
