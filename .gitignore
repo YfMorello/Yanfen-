@@ -36,3 +36,5 @@ env/
 target/
 dbt_packages/
 logs/
+
+!data/offshore_wind.duckdb
