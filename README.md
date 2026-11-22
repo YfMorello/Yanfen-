@@ -1,6 +1,6 @@
 # Yanfen Chen
 
-**Data & Analytics Engineer | MSc Transport & Logistics (DTU)**  
+**Data & Analytics Engineer**  
 Building scalable data pipelines, analytical models, and network optimization solutions using **Python, SQL, dbt, DuckDB, and Julia**.
 
 ---
