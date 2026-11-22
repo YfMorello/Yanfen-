@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual environments & Conda
+venv/
+.venv/
+env/
+.conda/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# macOS & IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Data & local databases (keep sample data explicitly if needed)
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.db
+*.csv
+!data/sample_*.csv
+
+# dbt artifacts
+target/
+dbt_packages/
+logs/
