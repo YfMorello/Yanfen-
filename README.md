@@ -14,9 +14,8 @@ Building scalable data pipelines, analytical models, and network optimization so
 
 ### Featured Projects
 
-- **[Urban-Transport-Optimisation](https://github.com/YfMorello/Urban-Transport-Optimisation)**  
-  End-to-end data preprocessing and mixed-integer linear programming (MILP) pipeline in Python and Julia to optimize bike-sharing dock allocation along Copenhagen's Ring 4 BRT corridor (400S).  
-
+- **[Urban-Transport-Optimisation](https://github.com/Yanfen-/Urban-Transport-Optimisation)**  
+  End-to-end data preprocessing and mixed-integer linear programming (MILP) pipeline in Python and Julia to optimize bike-sharing dock allocation along Copenhagen's Ring 4 BRT corridor (400S).
 ---
 
 ### Contact
